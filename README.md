@@ -17,9 +17,10 @@ pip install -r requirements.txt
 python generate_data.py        # prints "24 1224 48"; regenerates data/hubs.csv, raw_shipments.csv, new_shipments.csv
 python part_a_clean_eda.py     # writes data/modelling_table.csv and outputs/part_a_*.csv
 python part_b_regression.py    # writes outputs/part_b_*.csv
+python part_c_classification.py  # writes outputs/part_c_*.csv
 ```
 
-The commands for Parts C–D will be added as those Parts are built.
+The commands for Part D will be added when that Part is built.
 
 ## Data findings
 
@@ -123,7 +124,79 @@ For transparency, linear regression remains a strong, simple fallback.
 
 ## Model results (classification)
 
-*To be completed in Part C.*
+All numbers come from `outputs/part_c_models.csv`, `part_c_feature_scores.csv`, `part_c_selectk.csv`,
+`part_c_tuning.csv`, `part_c_thresholds.csv`, `part_c_final_test.csv` and `part_c_final_config.csv`.
+The target is `is_delayed`. The split is stratified: 840 / 180 / 180 rows, with 195 / 42 / 41 delayed parcels.
+
+**Blind baseline.** Predicting "on time" for every parcel scores **0.7667 accuracy** on validation (TN 138, FP 0, FN 42, TP 0).
+Its recall is 0, so it catches none of the 42 delayed parcels, and its accuracy only reflects that about 77% of parcels are on time.
+Accuracy alone therefore hides a useless model. F1 and recall are the metrics that matter.
+
+| Model (validation, threshold 0.5) | Accuracy | Precision | Recall | F1 |
+|---|---|---|---|---|
+| blind_all_on_time | 0.7667 | 0.0 | 0.0 | 0.0 |
+| logistic_regression | 0.9056 | 0.7778 | 0.8333 | 0.8046 |
+| decision_tree_depth_6 | 0.8833 | 0.7561 | 0.7381 | 0.7470 |
+| random_forest_default | 0.9111 | 0.8421 | 0.7619 | 0.8000 |
+
+**Noise columns.** The five bookkeeping columns together take **0.2253** of the default forest's importance:
+
+| Column | Importance |
+|---|---|
+| `label_print_batch` | 0.0462 |
+| `scanner_build_no` | 0.0377 |
+| `tape_roll_no` | 0.0478 |
+| `sticker_serial_mod` | 0.0496 |
+| `shelf_slot_no` | 0.0440 |
+
+The forest spreads importance onto random columns simply because it can split on them.
+By F-score, **all five fall outside the top 7**: their ranks are 8, 12, 14, 16 and 17, and every F-score is below 4.6.
+The top 7 by F-score are `distance_km`, `hub_tier`, `hub_daily_capacity`, `n_stops`, `promised_hours`, `rain_flag` and `sale_event_flag`.
+The smallest F-score among them is 36.7281.
+
+**What the k table shows.** Validation F1 by number of selected columns:
+
+| k | Validation F1 |
+|---|---|
+| 5 | 0.6988 |
+| 7 | **0.8333** |
+| 10 | 0.8140 |
+| 12 | 0.8049 |
+| 17 | 0.8000 |
+
+Five columns is too few, because `rain_flag` and `sale_event_flag` are lost.
+Seven columns is the best. Adding the weaker and noise columns back slowly lowers F1.
+
+**Tuning versus the untuned forest.** Both searches ran on the 7 selected columns:
+
+| Search | Candidates | Fits | Best CV accuracy | Validation F1 |
+|---|---|---|---|---|
+| Grid search | 27 | 135 | **0.8952** | 0.7750 |
+| Randomized search | 9 | 45 | 0.8905 | 0.7901 |
+| Untuned forest (100 trees, no depth limit, `min_samples_leaf` 1) | 1 | 1 | — | **0.8333** |
+
+Tuning did **not** beat the untuned forest on validation. The final configuration is therefore `default_forest_same_7_features`.
+This shows that on a 180-row validation set with only 42 delayed parcels, a few parcels decide the winner.
+The searches optimised cross-validated *accuracy* on training folds, which is not the same as F1 on validation.
+The gaps between the three candidates are small enough to be noise, not proof that tuning is harmful.
+
+**Alert threshold.** The operations rule is to take the highest threshold whose validation recall is at least 0.80, because missing a delayed parcel costs more than an unnecessary call.
+
+| Threshold | Precision | Recall | Meets the rule? |
+|---|---|---|---|
+| 0.4 | 0.7400 | 0.8810 | yes |
+| **0.5** | **0.7955** | **0.8333** | **yes, the highest that does** |
+| 0.6 | 0.8889 | 0.7619 | no, recall drops below 0.80 |
+
+The chosen threshold is **0.5**. Raising it to 0.6 would make alerts more precise but would miss 3 more delayed parcels (FN 10 instead of 7).
+Lowering it would catch a few more delayed parcels at the cost of many extra calls. At 0.1 there are 44 false alarms.
+
+**Test result (one evaluation, threshold 0.5).** Precision is **0.6889**, recall **0.7561** and F1 **0.7209** (TN 125, FP 14, FN 10, TP 31).
+Test recall is lower than validation recall (0.7561 versus 0.8333), so on new data the model fell short of the 0.80 target.
+The test set has only 41 delayed parcels, so each missed parcel moves recall by about 0.024.
+The gap is 3 parcels' worth, well within what one small split can produce.
+But it is a warning: the 0.80 recall target was met on the split used to choose the threshold, not proven on unseen data.
+The model was not re-tuned after seeing the test result.
 
 ## Operations recommendation
 
